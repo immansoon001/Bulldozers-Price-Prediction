@@ -1,0 +1,22 @@
+#ignore virtual environment folders
+venv/
+env/
+./venv
+
+#ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+#ignore data files
+data/
+model/model.pkl
+
+#python cache files
+__pycache__/
+*.pyc
+
+#environment variables
+.env
+
+#ignore
+*.pkl
+model/
