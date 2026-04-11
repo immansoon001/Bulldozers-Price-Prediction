@@ -3,151 +3,447 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, r2_score
+import sys
+from pathlib import Path
+from datetime import datetime
 
-st.set_page_config(page_title="Bulldozer Price Prediction", layout="wide")
-st.title("🚜 Bulldozer Sale Price Prediction")
+# ============================================================================
+# STREAMLIT PAGE CONFIGURATION
+# ============================================================================
+st.set_page_config(
+    page_title="Bulldozer Price Prediction",
+    page_icon="🚜",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-MODEL_PATH = "model/model.pkl"
-FEATURE_PATH = "model/features.pkl"
+# ============================================================================
+# CACHE FUNCTIONS FOR MODEL AND FEATURES
+# ============================================================================
+@st.cache_resource
+def load_model(model_path="model.pkl"):
+    """Load pre-trained RandomForest model."""
+    possible_paths = [
+        model_path,
+        os.path.join("model", "model.pkl"),
+        os.path.join(Path.cwd(), "model", "model.pkl")
+    ]
+    
+    model_found = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            model_found = path
+            break
+    
+    if model_found is None:
+        st.error("❌ **Model file not found**")
+        st.warning(f"""
+        Please ensure model.pkl exists in the working directory.
+        Run the Jupyter notebook: `Bulldozer-Price-Predictions.ipynb`
+        """)
+        return None
+    
+    try:
+        model = joblib.load(model_found)
+        return model
+    except Exception as e:
+        st.error(f"❌ Error loading model: {str(e)}")
+        return None
 
-# ---------------------- LOAD DATA ----------------------
-@st.cache_data
-def load_data():
-    df = pd.read_csv(
-        "data/bluebook-for-bulldozers/TrainAndValid.csv",
-        low_memory=False,
-        parse_dates=["saledate"]
-    )
-    return df
+@st.cache_resource
+def load_features(features_path="features.pkl"):
+    """Load feature names from saved file."""
+    possible_paths = [
+        features_path,
+        os.path.join("model", "features.pkl"),
+        os.path.join(Path.cwd(), "model", "features.pkl")
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                features = joblib.load(path)
+                return features.tolist() if hasattr(features, 'tolist') else list(features)
+            except Exception as e:
+                st.warning(f"Could not load features from {path}: {str(e)}")
+    
+    return None
 
-# ---------------------- PREPROCESS ----------------------
-def preprocess_data(df):
-    df = df.copy()
+# ============================================================================
+# PREPROCESSING FUNCTION
+# ============================================================================
+def preprocess_input(input_dict, features_list):
+    """
+    Convert raw input to model-ready format.
+    - Convert categorical columns to numeric codes
+    - Create feature vector with all required columns
+    - Handle missing values
+    """
+    df_input = pd.DataFrame([input_dict])
+    
+    # Known categorical columns that need encoding
+    categorical_cols = [
+        'state', 'ProductSize', 'UsageBand', 'fiModelDesc', 
+        'fiBaseModel', 'fiSecondaryDesc', 'fiModelSeries', 'fiModelDescriptor',
+        'fiProductClassDesc', 'ProductGroup', 'ProductGroupDesc',
+        'Drive_System', 'Enclosure', 'Forks', 'Pad_Type', 'Ride_Control',
+        'Stick', 'Transmission', 'Turbocharged', 'Blade_Extension',
+        'Blade_Width', 'Enclosure_Type', 'Engine_Horsepower', 'Hydraulics',
+        'Pushblock', 'Ripper', 'Scarifier', 'Tip_Control', 'Tire_Size',
+        'Coupler', 'Coupler_System', 'Grouser_Tracks', 'Hydraulics_Flow',
+        'Track_Type', 'Undercarriage_Pad_Width', 'Stick_Length', 'Thumb',
+        'Pattern_Changer', 'Grouser_Type', 'Backhoe_Mounting', 'Blade_Type',
+        'Travel_Controls', 'Differential_Type', 'Steering_Controls'
+    ]
+    
+    # Encode categorical columns
+    for col in categorical_cols:
+        if col in df_input.columns:
+            df_input[col] = pd.Categorical(df_input[col]).codes + 1
+    
+    # Create output dataframe with all features
+    df_output = pd.DataFrame(0, index=[0], columns=features_list)
+    
+    # Fill in available features
+    for col in df_input.columns:
+        if col in features_list:
+            df_output[col] = df_input[col].values[0]
+    
+    # Ensure correct column order
+    df_output = df_output[features_list]
+    
+    return df_output
 
-    df["saleYear"] = df.saledate.dt.year
-    df["saleMonth"] = df.saledate.dt.month
-    df["saleDay"] = df.saledate.dt.day
-    df["saleDayOfWeek"] = df.saledate.dt.dayofweek
-    df["saleDayOfYear"] = df.saledate.dt.dayofyear
-    df.drop("saledate", axis=1, inplace=True)
+# ============================================================================
+# APP TITLE AND DESCRIPTION
+# ============================================================================
+st.title("🚜 Bulldozer Price Prediction")
+st.markdown("""
+Predict the sale price of a bulldozer using machine learning.
+Fill in the bulldozer specifications below to get an instant price estimate.
+""")
 
-    for label, content in df.items():
-        if pd.api.types.is_numeric_dtype(content):
-            if pd.isnull(content).sum():
-                df[label + "_is_missing"] = pd.isnull(content)
-                df[label] = content.fillna(content.median())
-        else:
-            df[label + "_is_missing"] = pd.isnull(content)
-            df[label] = pd.Categorical(content).codes + 1
+# ============================================================================
+# SIDEBAR - INSTRUCTIONS AND DIAGNOSTICS
+# ============================================================================
+with st.sidebar:
+    st.header("ℹ️ Instructions")
+    st.markdown("""
+    ### How to use:
+    1. Fill in the bulldozer specifications
+    2. Click the **Predict Price** button
+    3. View the predicted price and estimate range
+    
+    ### Key Features:
+    - **Year Made**: Manufacturing year
+    - **Machine Hours**: Total operating hours
+    - **Usage Band**: Low/Medium/High intensity use
+    - **Product Size**: Physical size category
+    - **State**: Location
+    - **Sale Date**: Year, month, and day of sale
+    """)
+    
+    with st.expander("🔧 Model Diagnostics"):
+        st.markdown("**Model Status:**")
+        model_status = "✓ Loaded" if os.path.exists("model.pkl") else "✗ Not Found"
+        features_status = "✓ Loaded" if os.path.exists("features.pkl") else "✗ Not Found"
+        
+        st.write(f"Model: {model_status}")
+        st.write(f"Features: {features_status}")
+        st.write(f"**Working Dir:** `{Path.cwd()}`")
 
-    return df
+# ============================================================================
+# LOAD MODEL AND FEATURES
+# ============================================================================
+model = load_model()
+feature_names = load_features()
 
-# ---------------------- TRAIN MODEL ----------------------
-def train_model(df):
-    df = df.sort_values(by="saledate")
-    df = preprocess_data(df)
+if model is None or feature_names is None:
+    st.error("⚠️ Cannot proceed without model and features. Please check the diagnostics in the sidebar.")
+    st.stop()
 
-    df_train = df[df.saleYear != 2012]
-    df_val = df[df.saleYear == 2012]
+st.success(f"✓ Model loaded successfully ({model.n_features_in_} features)")
 
-    X_train = df_train.drop("SalePrice", axis=1)
-    y_train = df_train["SalePrice"]
-    X_val = df_val.drop("SalePrice", axis=1)
-    y_val = df_val["SalePrice"]
+# ============================================================================
+# USER INPUT SECTION
+# ============================================================================
+st.divider()
+st.subheader("📋 Bulldozer Specifications")
 
-    model = RandomForestRegressor(
-        n_estimators=40,
-        min_samples_leaf=1,
-        min_samples_split=14,
-        max_features=0.5,
-        n_jobs=-1,
-        random_state=42
-    )
+# Create organized input sections with columns
+tab1, tab2, tab3 = st.tabs(["Basic Info", "Technical Specs", "Sale Details"])
 
-    model.fit(X_train, y_train)
-
-    # ✅ Save model & features
-    os.makedirs("model", exist_ok=True)
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump(X_train.columns, FEATURE_PATH)
-
-    preds = model.predict(X_val)
-    mae = mean_absolute_error(y_val, preds)
-    r2 = r2_score(y_val, preds)
-
-    return model, mae, r2, X_train.columns
-
-# ---------------------- LOAD MODEL ----------------------
-def load_model():
-    if os.path.exists(MODEL_PATH) and os.path.exists(FEATURE_PATH):
-        model = joblib.load(MODEL_PATH)
-        cols = joblib.load(FEATURE_PATH)
-        return model, cols
-    return None, None
-
-# ---------------------- UI ----------------------
-
-st.sidebar.header("⚙️ Controls")
-
-if st.sidebar.button("Train Model"):
-    df = load_data()
-    st.write("## Raw Data Sample")
-    st.dataframe(df.head())
-
-    with st.spinner("Training model..."):
-        model, mae, r2, cols = train_model(df)
-
-    st.success("✅ Model trained & saved!")
-    st.write(f"Validation MAE: {mae:.2f}")
-    st.write(f"Validation R²: {r2:.3f}")
-
-    st.session_state["model"] = model
-    st.session_state["cols"] = cols
-
-if st.sidebar.button("Load Saved Model"):
-    model, cols = load_model()
-
-    if model is not None:
-        st.session_state["model"] = model
-        st.session_state["cols"] = cols
-        st.success("✅ Model loaded successfully!")
-    else:
-        st.error("❌ No saved model found. Train first.")
-
-# ---------------------- PREDICTION ----------------------
-
-if "model" in st.session_state:
-    st.write("## 📊 Make Predictions on Test Data")
-
-    if st.button("Predict on Test.csv"):
-        df_test = pd.read_csv(
-            "data/bluebook-for-bulldozers/Test.csv",
-            low_memory=False,
-            parse_dates=["saledate"]
+with tab1:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        year_made = st.number_input(
+            "Year Made",
+            min_value=1960,
+            max_value=2030,
+            value=2010,
+            step=1,
+            help="Manufacturing year of the bulldozer"
+        )
+    
+    with col2:
+        machine_hours = st.number_input(
+            "Machine Hours (Current Meter)",
+            min_value=0,
+            max_value=100000,
+            value=5000,
+            step=100,
+            help="Total operating hours on the machine"
+        )
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        state = st.selectbox(
+            "State",
+            options=sorted(['Alabama', 'Arizona', 'Arkansas', 'California', 
+                          'Colorado', 'Florida', 'Georgia', 'Illinois', 
+                          'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana',
+                          'Michigan', 'Minnesota', 'Missouri', 'Mississippi',
+                          'North Carolina', 'New York', 'Ohio', 'Oklahoma',
+                          'Oregon', 'Pennsylvania', 'Texas', 'Utah', 'Washington',
+                          'Wisconsin', 'Other']),
+            help="State where the bulldozer will be/was auctioned"
+        )
+    
+    with col4:
+        usage_band = st.selectbox(
+            "Usage Band",
+            options=["Low", "Medium", "High"],
+            help="Typical usage intensity (Low/Medium/High)"
         )
 
-        df_test = preprocess_data(df_test)
-
-        # Align columns with training
-        df_test = df_test.reindex(columns=st.session_state["cols"], fill_value=0)
-
-        preds = st.session_state["model"].predict(df_test)
-
-        st.write("### Sample Predictions")
-        st.dataframe(pd.DataFrame({"Prediction": preds}).head())
-
-        # Download predictions
-        out = pd.DataFrame({"SalePrice": preds})
-        csv = out.to_csv(index=False).encode("utf-8")
-
-        st.download_button(
-            "⬇️ Download Predictions",
-            data=csv,
-            file_name="predictions.csv",
-            mime="text/csv"
+with tab2:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        product_size = st.selectbox(
+            "Product Size",
+            options=["Mini", "Compact", "Small", "Medium", "Large / Medium", "Large"],
+            help="Physical size category of the bulldozer"
+        )
+    
+    with col2:
+        product_group = st.selectbox(
+            "Product Group",
+            options=["WL", "SSL", "TEX", "BL", "TTT", "MG"],
+            help="Equipment type (WL=Wheel Loader, SSL=Skid Steer Loader, etc.)"
+        )
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        drive_system = st.selectbox(
+            "Drive System",
+            options=["No", "Two Wheel Drive", "Four Wheel Drive", "All Wheel Drive", "None or Unspecified"],
+            help="Type of drive system"
+        )
+    
+    with col4:
+        transmission = st.selectbox(
+            "Transmission",
+            options=["Standard", "Powershift", "Powershuttle", "Hydrostatic", "None or Unspecified"],
+            help="Transmission type"
         )
 
-else:
-    st.info("👉 Train or Load a model from the sidebar to start.")
+with tab3:
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        sale_year = st.number_input(
+            "Sale Year",
+            min_value=2000,
+            max_value=2030,
+            value=datetime.now().year,
+            step=1,
+            help="Year of sale"
+        )
+    
+    with col2:
+        sale_month = st.slider(
+            "Sale Month",
+            min_value=1,
+            max_value=12,
+            value=datetime.now().month,
+            help="Month of sale (1=Jan, 12=Dec)"
+        )
+    
+    with col3:
+        sale_day = st.slider(
+            "Sale Day",
+            min_value=1,
+            max_value=31,
+            value=min(datetime.now().day, 28),
+            help="Day of sale"
+        )
+
+# ============================================================================
+# PREDICTION SECTION
+# ============================================================================
+st.divider()
+
+col1, col2, col3 = st.columns([2, 1, 1])
+
+with col1:
+    predict_button = st.button("🔮 Predict Price", use_container_width=True, type="primary")
+
+with col2:
+    show_debug = st.checkbox("Debug Info", value=False)
+
+# ============================================================================
+# MAKE PREDICTION
+# ============================================================================
+if predict_button:
+    try:
+        # Create input dictionary
+        input_data = {
+            'SalesID': 0,
+            'MachineID': 0,
+            'ModelID': 0,
+            'datasource': 0,
+            'auctioneerID': 0,
+            'YearMade': year_made,
+            'MachineHoursCurrentMeter': machine_hours,
+            'UsageBand': usage_band,
+            'fiModelDesc': 'Unknown',
+            'fiBaseModel': 'Unknown',
+            'fiSecondaryDesc': 'Unknown',
+            'fiModelSeries': 'Unknown',
+            'fiModelDescriptor': 'Unknown',
+            'ProductSize': product_size,
+            'fiProductClassDesc': 'Unknown',
+            'state': state,
+            'ProductGroup': product_group,
+            'ProductGroupDesc': 'Unknown',
+            'Drive_System': drive_system,
+            'Enclosure': 'Unknown',
+            'Forks': 0,
+            'Pad_Type': 'Unknown',
+            'Ride_Control': 'Unknown',
+            'Stick': 'Unknown',
+            'Transmission': transmission,
+            'Turbocharged': 'Unknown',
+            'Blade_Extension': 'Unknown',
+            'Blade_Width': 'Unknown',
+            'Enclosure_Type': 'Unknown',
+            'Engine_Horsepower': 'Unknown',
+            'Hydraulics': 'Unknown',
+            'Pushblock': 'Unknown',
+            'Ripper': 'Unknown',
+            'Scarifier': 'Unknown',
+            'Tip_Control': 'Unknown',
+            'Tire_Size': 'Unknown',
+            'Coupler': 'Unknown',
+            'Coupler_System': 'Unknown',
+            'Grouser_Tracks': 'Unknown',
+            'Hydraulics_Flow': 'Unknown',
+            'Track_Type': 'Unknown',
+            'Undercarriage_Pad_Width': 'Unknown',
+            'Stick_Length': 'Unknown',
+            'Thumb': 'Unknown',
+            'Pattern_Changer': 'Unknown',
+            'Grouser_Type': 'Unknown',
+            'Backhoe_Mounting': 'Unknown',
+            'Blade_Type': 'Unknown',
+            'Travel_Controls': 'Unknown',
+            'Differential_Type': 'Unknown',
+            'Steering_Controls': 'Unknown',
+            'saleYear': sale_year,
+            'saleMonth': sale_month,
+            'saleDay': sale_day,
+            'saleDayOfWeek': pd.Timestamp(year=sale_year, month=sale_month, day=sale_day).dayofweek,
+            'saleDayOfYear': pd.Timestamp(year=sale_year, month=sale_month, day=sale_day).dayofyear,
+        }
+        
+        # Show debug info if requested
+        if show_debug:
+            with st.expander("📊 Input Data", expanded=True):
+                st.json(input_data)
+        
+        # Preprocess input
+        input_processed = preprocess_input(input_data, feature_names)
+        
+        if show_debug:
+            with st.expander("🔧 Processed Features", expanded=True):
+                st.dataframe(input_processed.T, use_container_width=True)
+        
+        # Make prediction
+        prediction = model.predict(input_processed)
+        predicted_price = prediction[0]
+        
+        # Display results
+        st.success("✓ Prediction Complete!")
+        
+        # Main result
+        st.divider()
+        col_pred, col_range = st.columns(2)
+        
+        with col_pred:
+            st.metric(
+                label="💰 Predicted Sale Price",
+                value=f"${predicted_price:,.0f}",
+                delta=None
+            )
+        
+        with col_range:
+            low_estimate = predicted_price * 0.80
+            high_estimate = predicted_price * 1.20
+            st.metric(
+                label="📊 Estimated Range (±20%)",
+                value=f"${low_estimate:,.0f} — ${high_estimate:,.0f}"
+            )
+        
+        # Input summary
+        st.divider()
+        st.subheader("📝 Input Summary")
+        
+        summary_data = {
+            'Specification': [
+                'Year Made',
+                'Machine Hours',
+                'Usage Band',
+                'Product Size',
+                'State',
+                'Product Group',
+                'Drive System',
+                'Transmission',
+                'Sale Date'
+            ],
+            'Value': [
+                str(year_made),
+                f"{machine_hours:,} hours",
+                usage_band,
+                product_size,
+                state,
+                product_group,
+                drive_system,
+                transmission,
+                f"{sale_month}/{sale_day}/{sale_year}"
+            ]
+        }
+        
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        
+    except Exception as e:
+        st.error(f"❌ Error making prediction: {str(e)}")
+        if show_debug:
+            st.write("Full error details:")
+            st.code(str(e))
+
+# ============================================================================
+# FOOTER
+# ============================================================================
+st.divider()
+st.markdown("""
+---
+**Bulldozer Price Prediction Model**  
+*Powered by Random Forest Regressor*  
+Dataset: Blue Book for Bulldozers  
+Model Features: 102 | Training Samples: 400,000+
+""")
